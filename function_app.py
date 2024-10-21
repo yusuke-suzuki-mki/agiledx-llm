@@ -4,6 +4,7 @@ import os
 import json
 import uuid
 import logging
+import zipfile
 import tempfile
 import requests
 from azure.core.credentials import AzureKeyCredential
@@ -322,7 +323,8 @@ def generate_answer(req: func.HttpRequest) -> func.HttpResponse:
     description: 項目の説明を記述
     items: 配列の要素の型を指定
     extAttributePhysicalName: パスカルケースの英語名を設定
-    すべての項目を埋めたJSON Schemaを生成し、それぞれのファイルを作成してzip形式でダウンロードできるようにしてください。
+    すべての項目を埋めたJSON Schemaを複数生成し、それぞれ生成されたJson Schemaをlist[]の中に入れてください。Schema毎に"$schema": "http://json-schema.org/draft-04/schema#",を先頭に追加するのを忘れないようにしてください。
+    ```json ```という文言は必要ありません。回答はlistの"["から始めて下さい。その他の文言は出力しないでください。
     """
 
     # ユーザからの質問を元に、Azure AI Searchに投げる検索クエリを生成するためのテンプレートを定義する。
@@ -430,19 +432,64 @@ def generate_answer(req: func.HttpRequest) -> func.HttpResponse:
         generated_answer = response.choices[0].message.content.strip()
         logging.info(f"生成された回答: {generated_answer}")
 
-        # プロンプトと生成された回答を CosmosDB に保存
-        save_to_cosmos(prompt, generated_answer)
+        # JSONが空でないかチェック
+        if not generated_answer:
+            logging.error("生成された回答が空です")
+            return func.HttpResponse(
+                json.dumps({"error": "生成された回答が空です"}, ensure_ascii=False),
+                mimetype="application/json",
+                status_code=400
+            )
 
+        # 生成された回答をJSONとしてパース
+        try:
+            json_schemas = json.loads(generated_answer)
+        except json.JSONDecodeError as e:
+            logging.error(f"JSONのパースに失敗しました: {str(e)}")
+            return func.HttpResponse(
+                json.dumps({"error": "無効なJSON形式です"}, ensure_ascii=False),
+                mimetype="application/json",
+                status_code=400
+            )
+
+        # 一時ディレクトリを作成
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # ZIPファイルの保存先
+            zip_filename = os.path.join(temp_dir, 'schemas.zip')
+
+            # ZIPファイルを作成してスキーマファイルを追加
+            with zipfile.ZipFile(zip_filename, 'w') as zipf:
+                for index, schema in enumerate(json_schemas):
+                    # スキーマファイル名を生成
+                    schema_filename = f"schema_{index + 1}.json"
+                    schema_path = os.path.join(temp_dir, schema_filename)
+
+                    # 個別のスキーマファイルを保存
+                    with open(schema_path, 'w', encoding='utf-8') as f:
+                        json.dump(schema, f, ensure_ascii=False, indent=4)
+
+                    # ZIPファイルにスキーマファイルを追加
+                    zipf.write(schema_path, arcname=schema_filename)
+
+            # ZIPファイルを読み込みレスポンスとして返却
+            with open(zip_filename, 'rb') as zip_file:
+                zip_data = zip_file.read()
+
+        # HTTPレスポンスを返却
         return func.HttpResponse(
-            json.dumps({"answer": generated_answer}, ensure_ascii=False),
-            mimetype="application/json; charset=utf-8",
+            zip_data,
+            mimetype="application/zip",
+            headers={"Content-Disposition": "attachment; filename=schemas.zip"},
             status_code=200
         )
 
     except Exception as e:
-        logging.error(f"エラーが発生しました: {e}")
-        return func.HttpResponse(f"エラー: {str(e)}", status_code=500)
-
+        logging.error(f"エラーが発生しました: {str(e)}")
+        return func.HttpResponse(
+            json.dumps({"error": "エラーが発生しました"}, ensure_ascii=False),
+            mimetype="application/json",
+            status_code=500
+        )
 
 
 
