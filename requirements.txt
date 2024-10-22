@@ -6,7 +6,6 @@ azure-functions
 azure-core
 azure-search-documents
 azure-storage-blob
-azure-ai-formrecognizer
 azure-cosmos
 openai
 langchain
