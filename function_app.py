@@ -1,6 +1,7 @@
 import azure.functions as func  # Azure Functions のモジュールをインポート
 import logging  # ログ出力を行うためのモジュールをインポート
 import os  # 環境変数を操作するためのモジュールをインポート
+import io  # バイナリデータを扱うためのモジュール。BytesIOを使用してバイトストリームをメモリ上で操作する。
 import json  # JSONデータの操作を行うためのモジュールをインポート
 import uuid  # 一意の識別子（UUID）を生成するためのモジュールをインポート
 import logging  # ログ出力のために再度インポート（不要なので1つ削除するのが推奨）
@@ -8,7 +9,7 @@ import zipfile  # ZIPファイルを操作するためのモジュールをイ�
 import tempfile  # 一時ファイルを作成するためのモジュールをインポート
 import requests  # HTTPリクエストを送るためのモジュールをインポート
 from azure.core.credentials import AzureKeyCredential  # Azureのキー認証を行うためのクラスをインポート
-from azure.ai.formrecognizer import DocumentAnalysisClient  # Azure Form Recognizer クライアントをインポート
+from azure.ai.documentintelligence import DocumentIntelligenceClient  # Azure Form Recognizer クライアントをインポート
 from azure.search.documents import SearchClient  # Azure Cognitive Search クライアントをインポート
 from azure.search.documents.models import VectorizedQuery  # 検索用のクエリモデルをインポート
 from azure.cosmos import CosmosClient  # Azure CosmosDBクライアントをインポート
@@ -31,8 +32,8 @@ cosmos_db_container_name = os.environ.get("COSMOSDB_CONTAINER", "")  # 使用す
 storage_connection_string = os.environ.get("AZURE_STORAGE_CONNECTION_STRING", "")  # Azure Storageへの接続用
 
 # Azure Form Recognizer のエンドポイントとキーを環境変数から取得
-form_recognizer_endpoint = os.environ.get("FORM_RECOGNIZER_ENDPOINT", "")  # Form Recognizerのエンドポイント
-form_recognizer_key = os.environ.get("FORM_RECOGNIZER_KEY", "")  # Form Recognizerの認証キー
+document_intelligence_endpoint = os.environ.get("DOCUMENT_INTELLIGENCE_ENDPOINT", "")  # Form Recognizerのエンドポイント
+document_intelligence_key = os.environ.get("DOCUMENT_INTELLIGENCE_KEY", "")  # Form Recognizerの認証キー
 
 # Azure AI Search のエンドポイントとキーを環境変数から取得
 search_service_endpoint = os.environ.get("SEARCH_SERVICE_ENDPOINT", "")  # Cognitive Searchのエンドポイント
@@ -76,10 +77,10 @@ search_client = SearchClient(
     credential=AzureKeyCredential(search_api_key)  # 認証に使用するクレデンシャルを設定
 )
 
-# Azure Form Recognizer クライアントの初期化
-form_recognizer_client = DocumentAnalysisClient(
-    endpoint=form_recognizer_endpoint,  # Form Recognizerのエンドポイントを設定
-    credential=AzureKeyCredential(form_recognizer_key)  # 認証に使用するクレデンシャルを設定
+# Document Intelligence クライアントの初期化
+document_intelligence_client = DocumentIntelligenceClient(
+    endpoint=document_intelligence_endpoint,  # Form Recognizerのエンドポイントを設定
+    credential=AzureKeyCredential(document_intelligence_key)  # 認証に使用するクレデンシャルを設定
 )
 
 
@@ -122,19 +123,118 @@ def upload_files_and_create_index(req: func.HttpRequest) -> func.HttpResponse:
                 return func.HttpResponse("ファイルの読み込みに失敗しました", status_code=400)  # エラーレスポンスを返す
 
             # Form Recognizerでファイルを解析してテキストを抽出
-            poller = form_recognizer_client.begin_analyze_document(
-                model_id="prebuilt-layout", document=file_stream, output_content_format="markdown"  # プレビルドモデルを使用してレイアウト解析
+            poller = document_intelligence_client.begin_analyze_document(
+                model_id="prebuilt-layout", analyze_request=io.BytesIO(file_stream), content_type="application/octet-stream", output_content_format="markdown"  # プレビルドモデルを使用してレイアウト解析
             )
             result = poller.result()  # 解析結果を取得
-            extracted_text = ""  # 抽出されたテキストを格納する変数
-            for page in result.pages:  # 各ページを処理
-                for line in page.lines:  # 各ページの行ごとにテキストを取得
-                    extracted_text += line.content + " "  # 各行のテキストを結合していく
-            logging.info(f"抽出されたテキスト: {extracted_text[:500]}...")  # 抽出されたテキストの一部をログに記録
+            # 抽出されたテキストを格納する変数
+            extracted_text = ""
 
-            # 抽出されたテキストをチャンク化してベクトル化
-            text_chunks = chunk_text(extracted_text)  # チャンク化（小さな部分に分割）
-            for chunk in text_chunks:  # 各チャンクを処理
+            # ドキュメント内のスタイルを確認
+            if result.styles and any([style.is_handwritten for style in result.styles]):
+                logging.info("Document contains handwritten content")  # 手書きの内容が含まれていることをログに記録
+            else:
+                logging.info("Document does not contain handwritten content")  # 手書きの内容が含まれていないことをログに記録
+
+            # 各ページを処理
+            for page in result.pages:
+                logging.info(f"----Analyzing layout from page #{page.page_number}----")
+                logging.info(f"Page has width: {page.width} and height: {page.height}, measured with unit: {page.unit}")
+
+                # ページ内の行ごとのテキストとワード情報を処理
+                if page.lines:
+                    for line_idx, line in enumerate(page.lines):
+                        words = []
+                        if page.words:
+                            for word in page.words:
+                                logging.info(f"......Word '{word.content}' has a confidence of {word.confidence}")
+                                if _in_span(word, line.spans):
+                                    words.append(word)
+                        logging.info(
+                            f"...Line # {line_idx} has word count {len(words)} and text '{line.content}' "
+                            f"within bounding polygon '{_format_polygon(line.polygon)}'"
+                        )
+                        # 抽出されたテキストを追加
+                        extracted_text += line.content + " "
+
+                # ページ内の選択マーク（チェックボックスなど）の情報を処理
+                if page.selection_marks:
+                    for selection_mark in page.selection_marks:
+                        logging.info(
+                            f"Selection mark is '{selection_mark.state}' within bounding polygon "
+                            f"'{_format_polygon(selection_mark.polygon)}' and has a confidence of {selection_mark.confidence}"
+                        )
+
+            # ドキュメント内の段落情報を処理
+            if result.paragraphs:
+                logging.info(f"----Detected #{len(result.paragraphs)} paragraphs in the document----")
+                # 段落をスパンのオフセット順に並べ替えて順序通りに読み取る
+                result.paragraphs.sort(key=lambda p: (p.spans.sort(key=lambda s: s.offset), p.spans[0].offset))
+                logging.info("-----Print sorted paragraphs-----")
+                for paragraph in result.paragraphs:
+                    if not paragraph.bounding_regions:
+                        logging.info(f"Found paragraph with role: '{paragraph.role}' within N/A bounding region")
+                    else:
+                        logging.info(f"Found paragraph with role: '{paragraph.role}' within")
+                        logging.info(
+                            ", ".join(
+                                f" Page #{region.page_number}: {_format_polygon(region.polygon)} bounding region"
+                                for region in paragraph.bounding_regions
+                            )
+                        )
+                    logging.info(f"...with content: '{paragraph.content}'")
+                    logging.info(f"...with offset: {paragraph.spans[0].offset} and length: {paragraph.spans[0].length}")
+                    # 抽出されたテキストを追加
+                    extracted_text += paragraph.content + " "
+
+            # ドキュメント内のテーブル情報を処理
+            if result.tables:
+                for table_idx, table in enumerate(result.tables):
+                    logging.info(f"Table # {table_idx} has {table.row_count} rows and {table.column_count} columns")
+                    if table.bounding_regions:
+                        for region in table.bounding_regions:
+                            logging.info(
+                                f"Table # {table_idx} location on page: {region.page_number} is {_format_polygon(region.polygon)}"
+                            )
+                    for cell in table.cells:
+                        logging.info(f"...Cell[{cell.row_index}][{cell.column_index}] has text '{cell.content}'")
+                        if cell.bounding_regions:
+                            for region in cell.bounding_regions:
+                                logging.info(
+                                    f"...content on page {region.page_number} is within bounding polygon '{_format_polygon(region.polygon)}'"
+                                )
+                        # 抽出されたテキストを追加
+                        extracted_text += cell.content + " "
+
+            # 抽出されたテキストの一部をログに記録
+            logging.info(f"抽出されたテキスト: {extracted_text[:500]}...")
+
+            # Markdownベースのセマンティックチャンキング
+            headers_to_split_on = [
+                ("#", "Header 1"),
+                ("##", "Header 2"),
+                ("###", "Header 3"),
+            ]
+
+            logging.info('セマンティックチャンキング開始')  # チャンキング開始をログに記録
+            # langchainを活用してセマンティックチャンキングを実施
+            md_text_splitter = MarkdownHeaderTextSplitter(headers_to_split_on=headers_to_split_on, strip_headers=False)
+            markdown_splits = md_text_splitter.split_text(extracted_text)
+
+            # チャンク処理 (RecursiveCharacterTextSplitterを使用)
+            chunk_size = 500  # 各チャンクのサイズ
+            chunk_overlap = 30  # チャンク間の重複サイズ
+            text_splitter = RecursiveCharacterTextSplitter(
+                chunk_size=chunk_size, chunk_overlap=chunk_overlap
+            )
+
+            # Markdownで分割されたテキストをさらに小さなチャンクに分割
+            splits = text_splitter.split_documents(markdown_splits)
+            logging.info(f'セマンティックチャンキング終了{type(splits)}')  # チャンキング終了をログに記録
+
+            # Documentオブジェクトからpage_contentを取り出し、各チャンクをベクトル化してAzure Searchに登録
+            for i, split in enumerate(splits):
+                chunk = split.page_content  # 各チャンクの内容を取得
                 # Azure OpenAIを使用してチャンクをベクトルに変換
                 embedding_response = openai_client.embeddings.create(
                     input=chunk,  # チャンク化されたテキストを入力
