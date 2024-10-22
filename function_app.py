@@ -311,6 +311,8 @@ def generate_answer(req: func.HttpRequest) -> func.HttpResponse:
     """
 
     try:
+        # ---- リクエスト内のプロンプトを取得し、検索用のベクトルデータを作成 ---
+
         # リクエストボディからユーザープロンプトを取得
         req_body = req.get_json()  # リクエストからJSONデータを取得
         prompt = req_body.get('prompt')  # ユーザーからの質問（プロンプト）を取得
@@ -328,6 +330,9 @@ def generate_answer(req: func.HttpRequest) -> func.HttpResponse:
         # ユーザーからの質問を元に、Azure AI Searchに投げる検索クエリを生成する。
         messages_for_search_query = query_prompt_template.format(query=prompt)  # プロンプトテンプレートに質問を埋め込む
 
+
+        # ---- Azure AI Search内の情報を検索するためにGPTを使用して検索用の文章を洗練させる ----
+
         # Azure OpenAI に検索用クエリ生成を依頼
         response = openai_client.chat.completions.create(
             model=gpt_deploy,  # 使用するGPTモデル
@@ -340,6 +345,9 @@ def generate_answer(req: func.HttpRequest) -> func.HttpResponse:
         # 生成された検索クエリを取得
         search_query = response.choices[0].message.content.strip()  # クエリのテキストを取得
         logging.info(f"生成された検索クエリ: {search_query}")  # ログにクエリを記録
+
+
+        # ---- Azure AI Searchに対してセマンティックハイブリッド検索を行い、データモデル作成に必要な情報を取得する ----
 
         # 「ベクトル化されたクエリ」「キーワード検索用クエリ」を用いて、Azure AI Searchに対してセマンティックハイブリッド検索を行う。
         results = search_client.search(
@@ -357,6 +365,9 @@ def generate_answer(req: func.HttpRequest) -> func.HttpResponse:
 
         # セマンティックアンサーを取得する
         semantic_answers = results.get_answers()  # 検索結果からセマンティックアンサーを取得
+
+
+        # ---- Azure AI Searchの検索結果を用いてGPTにデータモデル生成を依頼する ----
 
         # 回答生成用のメッセージリスト
         messages_for_semantic_answer = []
@@ -402,6 +413,9 @@ def generate_answer(req: func.HttpRequest) -> func.HttpResponse:
         generated_answer = response.choices[0].message.content.strip()  # 回答テキストを取得
         logging.info(f"生成された回答: {generated_answer}")  # ログに回答を記録
 
+
+        # ---- GPTの回答結果からJson Schemaを抽出し、Json Schemaごとにファイルを作成、zip形式で圧縮する ----
+
         # JSONが空でないかチェック
         if not generated_answer:  # 回答が空の場合
             logging.error("生成された回答が空です")  # エラーメッセージをログに記録
@@ -444,6 +458,9 @@ def generate_answer(req: func.HttpRequest) -> func.HttpResponse:
             # ZIPファイルを読み込みレスポンスとして返却
             with open(zip_filename, 'rb') as zip_file:  # ZIPファイルをバイナリで読み込み
                 zip_data = zip_file.read()  # ZIPファイルの内容を読み込む
+
+        
+        # ---- 作成したzipファイルをレスポンスとして返却 ----
 
         # HTTPレスポンスを返却
         return func.HttpResponse(
