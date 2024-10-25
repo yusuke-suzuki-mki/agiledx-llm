@@ -579,6 +579,60 @@ def generate_answer(req: func.HttpRequest) -> func.HttpResponse:
         )
 
 
+# --- セマンティックハイブリッド検索の結果を返却する関数 ---
+@app.function_name('TestGenerateSearchResults')  # 関数名を設定
+@app.route(route="test_generate_search_results", auth_level=func.AuthLevel.ANONYMOUS)  # エンドポイント名とアクセスレベル（匿名アクセス）を設定
+def test_generate_search_results(req: func.HttpRequest) -> func.HttpResponse:
+    try:
+        # リクエストボディからユーザープロンプトを取得
+        req_body = req.get_json()
+        prompt = req_body.get('prompt')
+        if not prompt:
+            return func.HttpResponse("プロンプトが見つかりません。", status_code=400)
+
+        # セマンティックハイブリッド検索に必要なベクトル化されたクエリを生成
+        response = openai_client.embeddings.create(
+            input=prompt,
+            model=aoai_embedding_model
+        )
+        vector_query = VectorizedQuery(vector=response.data[0].embedding, k_nearest_neighbors=3, fields="contentVector")
+
+        # ユーザーからの質問を元に、Azure AI Searchに投げる検索クエリを生成する
+        query_prompt_template = "以下のユーザーからの質問に基づいて、検索クエリを生成してください: {query}"
+        search_query = query_prompt_template.format(query=prompt)
+
+        # Azure AI Searchに対してセマンティックハイブリッド検索を実行
+        results = search_client.search(
+            query_type='semantic',
+            semantic_configuration_name='ragdataset-semantic',
+            search_text=search_query,
+            vector_queries=[vector_query],
+            select=['id', 'content'],
+            query_caption='extractive',
+            query_answer="extractive",
+            highlight_pre_tag='<em>',
+            highlight_post_tag='</em>',
+            top=5  # 取得する結果数を設定
+        )
+
+        # 検索結果をすべて取得してリストにまとめる
+        all_results = [{"id": result["id"], "content": result["content"]} for result in results]
+
+        # プロンプトと検索結果をJSON形式でレスポンスとして返却
+        return func.HttpResponse(
+            json.dumps({"prompt": prompt, "results": all_results}, ensure_ascii=False, indent=4),
+            mimetype="application/json",
+            status_code=200
+        )
+
+    except Exception as e:
+        logging.error(f"エラーが発生しました: {str(e)}")
+        return func.HttpResponse(
+            json.dumps({"error": "エラーが発生しました"}, ensure_ascii=False),
+            mimetype="application/json",
+            status_code=500
+        )
+
 
 
 # --- セマンティックチャンキングの実装例 ---
