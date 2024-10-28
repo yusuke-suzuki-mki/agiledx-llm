@@ -265,9 +265,28 @@ def upload_files_and_create_index(req: func.HttpRequest) -> func.HttpResponse:
 def generate_answer(req: func.HttpRequest) -> func.HttpResponse:
 
     # AIのキャラクターを決めるためのシステムメッセージを定義する。
-    # ここでは、NoSQLデータモデルを作成するスペシャリストとして動作させる設定。
-    system_message = """
-    あなたは、ユーザーの要求に基づいてNoSQLデータモデルを作成するスペシャリストです。次のルールに従って、NoSQLデータモデルを設計し、JSON Schema形式で出力してください。
+    # 検索クエリ作成の専門家
+    system_message_for_query = """
+    あなたは検索の専門家です。ユーザーの質問内容を分析し、RAG（Retrieval Augmented Generation）検索に最適なクエリを作成してください。クエリは、検索エンジンが関連性の高い情報を正確に引き出せるように設計します。
+
+    以下の指示に従ってクエリを作成してください：
+    意図の理解: ユーザーの質問や目的を把握し、必要な情報の種類や検索対象を特定します。具体的な回答や資料を求めている場合は、その内容に沿ったキーワードや概念を抽出してください。
+    要素の抽出: 質問の重要なキーワードや概念を特定し、文脈や関連語も加味しながら、簡潔かつ検索に最適化された形で整理します。
+    検索精度の最適化: 必要に応じて、ユーザーの質問に関係のない一般的な単語や冗長な表現は省き、情報の関連度を高めるためのキーワードのみを使用します。
+    具体性の確保: ユーザーが特定の状況や分野に焦点を当てている場合、その背景に合う単語やフレーズを追加し、情報が絞り込まれるようにしてください。
+    出力フォーマット例:
+    質問：「新製品の環境への影響について教えてください」
+    クエリ：「新製品 環境影響 分析」
+    質問内容から必要な要素を抽出し、検索に適したキーワードのみで構成されたクエリを作成してください。
+    検索クエリ本文のみ出力してください。「クエリ：」等の部分は必要ありません。本文のみ出力してください
+    """
+
+    # NoSQLデータモデルを作成するスペシャリスト
+    system_message_for_data_model = """
+    あなたは、ユーザーの要求に基づいてNoSQLデータモデルを作成するスペシャリストです。
+    ユーザーの要求から最適な情報をRAGから取得してくるので、その取得してきたRAGの情報をもとにまずはシステムの全体のデータモデルを考えてください。
+    ただし、考えた結果は100点中60点程度の精度とし、精度を高めるために考えたデータモデルをもとに3回以上データモデルの精査をするようにしてください。
+    そして次のルールに従って、最終的なデータモデルのNoSQLデータモデルを設計し、JSON Schema形式で出力してください。JSON Schema形式のデータモデル情報のみ返却してください。
 
     ルール：
 
@@ -424,8 +443,8 @@ def generate_answer(req: func.HttpRequest) -> func.HttpResponse:
             input=prompt,  # ユーザーからの質問を入力としてベクトル化
             model=aoai_embedding_model  # 使用する埋め込みモデル
         )
-        # ベクトル化されたクエリを生成し、最も近い3つのコンテンツを検索する設定
-        vector_query = VectorizedQuery(vector=response.data[0].embedding, k_nearest_neighbors=3, fields="contentVector")
+        # ベクトル化されたクエリを生成し、最も近い5つのコンテンツを検索する設定
+        vector_query = VectorizedQuery(vector=response.data[0].embedding, k_nearest_neighbors=5, fields="contentVector")
 
         # ユーザーからの質問を元に、Azure AI Searchに投げる検索クエリを生成する。
         messages_for_search_query = query_prompt_template.format(query=prompt)  # プロンプトテンプレートに質問を埋め込む
@@ -437,7 +456,7 @@ def generate_answer(req: func.HttpRequest) -> func.HttpResponse:
         response = openai_client.chat.completions.create(
             model=gpt_deploy,  # 使用するGPTモデル
             messages=[
-                {"role": "system", "content": system_message},  # システムメッセージを設定
+                {"role": "system", "content": system_message_for_query},  # システムメッセージを設定
                 {"role": "user", "content": messages_for_search_query}  # ユーザーの質問を設定
             ]
         )
@@ -473,7 +492,7 @@ def generate_answer(req: func.HttpRequest) -> func.HttpResponse:
         messages_for_semantic_answer = []
 
         # システムメッセージを追加（生成する回答の指示）
-        messages_for_semantic_answer.append({"role": "system", "content": system_message})
+        messages_for_semantic_answer.append({"role": "system", "content": system_message_for_data_model})
 
         # セマンティックアンサーの有無で返答を変える
         user_message = ""
@@ -502,6 +521,8 @@ def generate_answer(req: func.HttpRequest) -> func.HttpResponse:
 
         # ユーザーからの入力メッセージとして設定
         messages_for_semantic_answer.append({"role": "user", "content": user_message})
+
+        logging.info(f"最終的にGPTに渡されるプロンプト: {messages_for_semantic_answer}")  # ログにクエリを記録
 
         # Azure OpenAIを使って最終的な回答を生成
         response = openai_client.chat.completions.create(
@@ -541,8 +562,18 @@ def generate_answer(req: func.HttpRequest) -> func.HttpResponse:
             # ZIPファイルの保存先
             zip_filename = os.path.join(temp_dir, 'schemas.zip')  # ZIPファイルのパスを設定
 
-            # ZIPファイルを作成してスキーマファイルを追加
+            # プロンプトをテキストファイルとして保存
+            prompt_filename = os.path.join(temp_dir, 'final_prompt.txt')  # プロンプトファイル名を設定
+            with open(prompt_filename, 'w', encoding='utf-8') as prompt_file:
+                # messages_for_semantic_answer の内容をテキストファイルに書き込む
+                for message in messages_for_semantic_answer:
+                    prompt_file.write(f"{message['role']}: {message['content']}\n")
+
+            # ZIPファイルを作成してスキーマファイルとプロンプトファイルを追加
             with zipfile.ZipFile(zip_filename, 'w') as zipf:  # ZIPファイルを作成
+                # プロンプトファイルをZIPに追加
+                zipf.write(prompt_filename, arcname='final_prompt.txt')  # テキストファイルをZIPに追加
+
                 for index, schema in enumerate(json_schemas):  # 各スキーマを処理
                     # スキーマファイル名を生成
                     schema_filename = f"schema_{index + 1}.json"  # ファイル名を生成
@@ -559,7 +590,6 @@ def generate_answer(req: func.HttpRequest) -> func.HttpResponse:
             with open(zip_filename, 'rb') as zip_file:  # ZIPファイルをバイナリで読み込み
                 zip_data = zip_file.read()  # ZIPファイルの内容を読み込む
 
-        
         # ---- 作成したzipファイルをレスポンスとして返却 ----
 
         # HTTPレスポンスを返却
@@ -583,6 +613,23 @@ def generate_answer(req: func.HttpRequest) -> func.HttpResponse:
 @app.function_name('TestGenerateSearchResults')  # 関数名を設定
 @app.route(route="test_generate_search_results", auth_level=func.AuthLevel.ANONYMOUS)  # エンドポイント名とアクセスレベル（匿名アクセス）を設定
 def test_generate_search_results(req: func.HttpRequest) -> func.HttpResponse:
+
+    # AIのキャラクターを決めるためのシステムメッセージを定義する。
+    # ここでは検索クエリ作成の専門家として動作させる想定
+    system_message_for_query = """
+    あなたは検索の専門家です。ユーザーの質問内容を分析し、RAG（Retrieval Augmented Generation）検索に最適なクエリを作成してください。クエリは、検索エンジンが関連性の高い情報を正確に引き出せるように設計します。
+
+    以下の指示に従ってクエリを作成してください：
+    意図の理解: ユーザーの質問や目的を把握し、必要な情報の種類や検索対象を特定します。具体的な回答や資料を求めている場合は、その内容に沿ったキーワードや概念を抽出してください。
+    要素の抽出: 質問の重要なキーワードや概念を特定し、文脈や関連語も加味しながら、簡潔かつ検索に最適化された形で整理します。
+    検索精度の最適化: 必要に応じて、ユーザーの質問に関係のない一般的な単語や冗長な表現は省き、情報の関連度を高めるためのキーワードのみを使用します。
+    具体性の確保: ユーザーが特定の状況や分野に焦点を当てている場合、その背景に合う単語やフレーズを追加し、情報が絞り込まれるようにしてください。
+    出力フォーマット例:
+    質問：「新製品の環境への影響について教えてください」
+    クエリ：「新製品 環境影響 分析」
+    質問内容から必要な要素を抽出し、検索に適したキーワードのみで構成されたクエリを作成してください。
+    検索クエリ本文のみ出力してください。「クエリ：」等の部分は必要ありません。本文のみ出力してください
+    """
     try:
         # リクエストボディからユーザープロンプトを取得
         req_body = req.get_json()
@@ -590,16 +637,32 @@ def test_generate_search_results(req: func.HttpRequest) -> func.HttpResponse:
         if not prompt:
             return func.HttpResponse("プロンプトが見つかりません。", status_code=400)
 
-        # セマンティックハイブリッド検索に必要なベクトル化されたクエリを生成
+        # セマンティックハイブリッド検索に必要な「ベクトル化されたクエリ」「キーワード検索用クエリ」のうち、ベクトル化されたクエリを生成する。
         response = openai_client.embeddings.create(
-            input=prompt,
-            model=aoai_embedding_model
+            input=prompt,  # ユーザーからの質問を入力としてベクトル化
+            model=aoai_embedding_model  # 使用する埋め込みモデル
         )
-        vector_query = VectorizedQuery(vector=response.data[0].embedding, k_nearest_neighbors=3, fields="contentVector")
+        # ベクトル化されたクエリを生成し、最も近い5つのコンテンツを検索する設定
+        vector_query = VectorizedQuery(vector=response.data[0].embedding, k_nearest_neighbors=5, fields="contentVector")
 
         # ユーザーからの質問を元に、Azure AI Searchに投げる検索クエリを生成する
         query_prompt_template = "以下のユーザーからの質問に基づいて、検索クエリを生成してください: {query}"
-        search_query = query_prompt_template.format(query=prompt)
+        messages_for_search_query = query_prompt_template.format(query=prompt)  # プロンプトテンプレートに質問を埋め込む
+
+
+        # ---- Azure AI Search内の情報を検索するためにGPTを使用して検索用の文章を洗練させる ----
+
+        # Azure OpenAI に検索用クエリ生成を依頼
+        response = openai_client.chat.completions.create(
+            model=gpt_deploy,  # 使用するGPTモデル
+            messages=[
+                {"role": "system", "content": system_message_for_query},  # システムメッセージを設定
+                {"role": "user", "content": messages_for_search_query}  # ユーザーの質問を設定
+            ]
+        )
+
+        # 生成された検索クエリを取得
+        search_query = response.choices[0].message.content.strip()  # クエリのテキストを取得
 
         # Azure AI Searchに対してセマンティックハイブリッド検索を実行
         results = search_client.search(
@@ -618,11 +681,27 @@ def test_generate_search_results(req: func.HttpRequest) -> func.HttpResponse:
         # 検索結果をすべて取得してリストにまとめる
         all_results = [{"id": result["id"], "content": result["content"]} for result in results]
 
-        # プロンプトと検索結果をJSON形式でレスポンスとして返却
+        # クエリと検索結果を1つのテキストファイルに書き込む
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".txt") as temp_file:
+            temp_file.write(f"検索クエリ:\n{search_query}\n\n".encode('utf-8'))
+            temp_file.write("検索結果:\n".encode('utf-8'))
+            for result in all_results:
+                temp_file.write(f"ID: {result['id']}\n内容: {result['content']}\n\n".encode('utf-8'))
+            temp_file_path = temp_file.name  # テキストファイルのパスを取得
+
+        # テキストファイルを読み込みレスポンスとして返却
+        with open(temp_file_path, 'rb') as file:
+            file_data = file.read()
+
+        # ファイル削除
+        os.remove(temp_file_path)
+
+        # HTTPレスポンスを返却
         return func.HttpResponse(
-            json.dumps({"prompt": prompt, "results": all_results}, ensure_ascii=False, indent=4),
-            mimetype="application/json",
-            status_code=200
+            file_data,  # テキストファイルのデータを返す
+            mimetype="text/plain",  # MIMEタイプをテキストに設定
+            headers={"Content-Disposition": "attachment; filename=search_results.txt"},  # ファイルのダウンロード名を設定
+            status_code=200  # 成功ステータスコード
         )
 
     except Exception as e:
