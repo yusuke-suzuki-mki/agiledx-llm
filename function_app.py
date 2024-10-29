@@ -98,11 +98,6 @@ document_intelligence_client = DocumentIntelligenceClient(
 def upload_files_and_create_index(req: func.HttpRequest) -> func.HttpResponse:
     logging.info('Python HTTP trigger function processed a file upload and index creation request.')  # ログに処理開始を記録
 
-    # --- 補助関数 ---
-    def chunk_text(text: str, chunk_size: int = 500) -> list:  # テキストを指定したサイズに分割する関数
-        chunks = [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]  # テキストをchunk_sizeごとに分割
-        return chunks
-
     try:
         # リクエストから複数のファイルを取得
         files = req.files.getlist('files')  # リクエストに含まれるファイルリストを取得
@@ -479,7 +474,7 @@ def generate_answer(req: func.HttpRequest) -> func.HttpResponse:
             query_answer="extractive",  # 抽出回答を使用
             highlight_pre_tag='<em>',  # ハイライトの開始タグ
             highlight_post_tag='</em>',  # ハイライトの終了タグ
-            top=2  # 上位2つの結果を取得
+            top=100  # 上位100個の結果を取得
         )
 
         # セマンティックアンサーを取得する
@@ -675,7 +670,7 @@ def test_generate_search_results(req: func.HttpRequest) -> func.HttpResponse:
             query_answer="extractive",
             highlight_pre_tag='<em>',
             highlight_post_tag='</em>',
-            top=5  # 取得する結果数を設定
+            top=100  # 取得する結果数を設定
         )
 
         # 検索結果をすべて取得してリストにまとめる
