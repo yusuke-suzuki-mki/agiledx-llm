@@ -123,86 +123,7 @@ def upload_files_and_create_index(req: func.HttpRequest) -> func.HttpResponse:
             )
             result = poller.result()  # 解析結果を取得
             # 抽出されたテキストを格納する変数
-            extracted_text = ""
-
-            # ドキュメント内のスタイルを確認
-            if result.styles and any([style.is_handwritten for style in result.styles]):
-                logging.info("Document contains handwritten content")  # 手書きの内容が含まれていることをログに記録
-            else:
-                logging.info("Document does not contain handwritten content")  # 手書きの内容が含まれていないことをログに記録
-
-            # 各ページを処理
-            for page in result.pages:
-                logging.info(f"----Analyzing layout from page #{page.page_number}----")
-                logging.info(f"Page has width: {page.width} and height: {page.height}, measured with unit: {page.unit}")
-
-                # ページ内の行ごとのテキストとワード情報を処理
-                if page.lines:
-                    for line_idx, line in enumerate(page.lines):
-                        words = []
-                        if page.words:
-                            for word in page.words:
-                                logging.info(f"......Word '{word.content}' has a confidence of {word.confidence}")
-                                if _in_span(word, line.spans):
-                                    words.append(word)
-                        logging.info(
-                            f"...Line # {line_idx} has word count {len(words)} and text '{line.content}' "
-                            f"within bounding polygon '{_format_polygon(line.polygon)}'"
-                        )
-                        # 抽出されたテキストを追加
-                        extracted_text += line.content + " "
-
-                # ページ内の選択マーク（チェックボックスなど）の情報を処理
-                if page.selection_marks:
-                    for selection_mark in page.selection_marks:
-                        logging.info(
-                            f"Selection mark is '{selection_mark.state}' within bounding polygon "
-                            f"'{_format_polygon(selection_mark.polygon)}' and has a confidence of {selection_mark.confidence}"
-                        )
-
-            # ドキュメント内の段落情報を処理
-            if result.paragraphs:
-                logging.info(f"----Detected #{len(result.paragraphs)} paragraphs in the document----")
-                # 段落をスパンのオフセット順に並べ替えて順序通りに読み取る
-                result.paragraphs.sort(key=lambda p: (p.spans.sort(key=lambda s: s.offset), p.spans[0].offset))
-                logging.info("-----Print sorted paragraphs-----")
-                for paragraph in result.paragraphs:
-                    if not paragraph.bounding_regions:
-                        logging.info(f"Found paragraph with role: '{paragraph.role}' within N/A bounding region")
-                    else:
-                        logging.info(f"Found paragraph with role: '{paragraph.role}' within")
-                        logging.info(
-                            ", ".join(
-                                f" Page #{region.page_number}: {_format_polygon(region.polygon)} bounding region"
-                                for region in paragraph.bounding_regions
-                            )
-                        )
-                    logging.info(f"...with content: '{paragraph.content}'")
-                    logging.info(f"...with offset: {paragraph.spans[0].offset} and length: {paragraph.spans[0].length}")
-                    # 抽出されたテキストを追加
-                    extracted_text += paragraph.content + " "
-
-            # ドキュメント内のテーブル情報を処理
-            if result.tables:
-                for table_idx, table in enumerate(result.tables):
-                    logging.info(f"Table # {table_idx} has {table.row_count} rows and {table.column_count} columns")
-                    if table.bounding_regions:
-                        for region in table.bounding_regions:
-                            logging.info(
-                                f"Table # {table_idx} location on page: {region.page_number} is {_format_polygon(region.polygon)}"
-                            )
-                    for cell in table.cells:
-                        logging.info(f"...Cell[{cell.row_index}][{cell.column_index}] has text '{cell.content}'")
-                        if cell.bounding_regions:
-                            for region in cell.bounding_regions:
-                                logging.info(
-                                    f"...content on page {region.page_number} is within bounding polygon '{_format_polygon(region.polygon)}'"
-                                )
-                        # 抽出されたテキストを追加
-                        extracted_text += cell.content + " "
-
-            # 抽出されたテキストの一部をログに記録
-            logging.info(f"抽出されたテキスト: {extracted_text[:500]}...")
+            extracted_text = result.content
 
             # Markdownベースのセマンティックチャンキング
             headers_to_split_on = [
@@ -217,7 +138,7 @@ def upload_files_and_create_index(req: func.HttpRequest) -> func.HttpResponse:
             markdown_splits = md_text_splitter.split_text(extracted_text)
 
             # チャンク処理 (RecursiveCharacterTextSplitterを使用)
-            chunk_size = 500  # 各チャンクのサイズ
+            chunk_size = 600  # 各チャンクのサイズ
             chunk_overlap = 30  # チャンク間の重複サイズ
             text_splitter = RecursiveCharacterTextSplitter(
                 chunk_size=chunk_size, chunk_overlap=chunk_overlap
@@ -283,6 +204,8 @@ def generate_answer(req: func.HttpRequest) -> func.HttpResponse:
     ただし、考えた結果は100点中60点程度の精度とし、精度を高めるために考えたデータモデルをもとに3回以上データモデルの精査をするようにしてください。
     そして次のルールに従って、最終的なデータモデルのNoSQLデータモデルを設計し、JSON Schema形式で出力してください。JSON Schema形式のデータモデル情報のみ返却してください。
 
+    ユーザーの要求：{prompt}
+
     ルール：
 
     各エンティティのデータスキーマは、必ずすべての項目を埋めて出力してください。
@@ -296,8 +219,8 @@ def generate_answer(req: func.HttpRequest) -> func.HttpResponse:
     extAttributePhysicalNameは、各フィールドに対応する物理的な属性名をパスカルケースで設定します。各フィールド名の対応関係を明確にしてください。
     displayNameはフィールドの表示名として日本語を設定してください。
     indexやuniqueなど、必要な制約が抜けないように設定してください。
+
     データ型の使用例と詳細設定
-    インテジャー型（number）
 
     使用例: インテジャー, インテジャー2
     設定項目:
@@ -309,7 +232,6 @@ def generate_answer(req: func.HttpRequest) -> func.HttpResponse:
     autoincrement: 自動インクリメントの設定が必要（step_numとstart_numを指定）
     minimumとmaximum: 値の範囲を設定
     extAttributePhysicalName: パスカルケースの英語名を設定
-    テキスト型（string）
 
     使用例: テキスト
     設定項目:
@@ -320,7 +242,6 @@ def generate_answer(req: func.HttpRequest) -> func.HttpResponse:
     default: デフォルト値を設定
     minLengthとmaxLength: 文字数の範囲を設定
     extAttributePhysicalName: パスカルケースの英語名を設定
-    電話番号（string, pattern）
 
     使用例: 電話番号
     設定項目:
@@ -330,7 +251,6 @@ def generate_answer(req: func.HttpRequest) -> func.HttpResponse:
     unique: 重複不可にする場合にtrue
     minLengthとmaxLength: 文字数の範囲を設定
     extAttributePhysicalName: パスカルケースの英語名を設定
-    メールアドレス（string, format=email）
 
     使用例: メールアドレス
     設定項目:
@@ -340,7 +260,6 @@ def generate_answer(req: func.HttpRequest) -> func.HttpResponse:
     unique: 重複不可にする場合にtrue
     minLengthとmaxLength: 文字数の範囲を設定
     extAttributePhysicalName: パスカルケースの英語名を設定
-    少数（number, decimal）
 
     使用例: 少数
     設定項目:
@@ -353,7 +272,6 @@ def generate_answer(req: func.HttpRequest) -> func.HttpResponse:
     minimumとmaximum: 値の範囲を設定
     extAttributePhysicalName: パスカルケースの英語名を設定
     extNumberFormat: "Decimal"
-    価格（number, currency）
 
     使用例: 価格
     設定項目:
@@ -366,7 +284,6 @@ def generate_answer(req: func.HttpRequest) -> func.HttpResponse:
     minimumとmaximum: 値の範囲を設定
     extAttributePhysicalName: パスカルケースの英語名を設定
     extNumberFormat: "Currency"
-    フラグ（boolean）
 
     使用例: フラグ
     設定項目:
@@ -375,7 +292,6 @@ def generate_answer(req: func.HttpRequest) -> func.HttpResponse:
     unique: 重複不可にする場合にtrue
     default: デフォルト値を設定
     extAttributePhysicalName: パスカルケースの英語名を設定
-    バイナリ（string, format=binary）
 
     使用例: バイナリ
     設定項目:
@@ -385,7 +301,6 @@ def generate_answer(req: func.HttpRequest) -> func.HttpResponse:
     mediaType: バイナリデータのメディアタイプを指定
     contentEncoding: "base64"などのエンコーディング方式
     extAttributePhysicalName: パスカルケースの英語名を設定
-    日時（string, format=date-time）
 
     使用例: 日時
     設定項目:
@@ -394,7 +309,6 @@ def generate_answer(req: func.HttpRequest) -> func.HttpResponse:
     format: "date-time"
     default: デフォルト値を設定
     extAttributePhysicalName: パスカルケースの英語名を設定
-    オブジェクト型（object）
 
     使用例: オブジェクト, オブジェクト2
     設定項目:
@@ -404,7 +318,6 @@ def generate_answer(req: func.HttpRequest) -> func.HttpResponse:
     additionalProperties: 不明なプロパティを許可するか設定
     required: 必須項目をリスト形式で指定（オブジェクト型のみ）
     extAttributePhysicalName: パスカルケースの英語名を設定
-    配列型（array）
 
     使用例: 配列, 配列2
     設定項目:
@@ -418,9 +331,6 @@ def generate_answer(req: func.HttpRequest) -> func.HttpResponse:
 
     # ユーザからの質問を元に、Azure AI Searchに投げる検索クエリを生成するためのテンプレートを定義する。
     query_prompt_template = """
-    以下のユーザーからの質問に基づいて、検索クエリを生成してください
-    例えば、「育児休暇はいつまで取れますか？」という質問があった場合、「育児休暇 取得期間」という形で回答を返してください。
-
     question: {query}
     """
 
@@ -487,7 +397,7 @@ def generate_answer(req: func.HttpRequest) -> func.HttpResponse:
         messages_for_semantic_answer = []
 
         # システムメッセージを追加（生成する回答の指示）
-        messages_for_semantic_answer.append({"role": "system", "content": system_message_for_data_model})
+        messages_for_semantic_answer.append({"role": "system", "content": system_message_for_data_model.format(prompt=prompt)})
 
         # セマンティックアンサーの有無で返答を変える
         user_message = ""
@@ -604,194 +514,212 @@ def generate_answer(req: func.HttpRequest) -> func.HttpResponse:
         )
 
 
-# --- セマンティックハイブリッド検索の結果を返却する関数 ---
-@app.function_name('TestGenerateSearchResults')  # 関数名を設定
-@app.route(route="test_generate_search_results", auth_level=func.AuthLevel.ANONYMOUS)  # エンドポイント名とアクセスレベル（匿名アクセス）を設定
-def test_generate_search_results(req: func.HttpRequest) -> func.HttpResponse:
+# --- チャンク前のDocument Intelligenceが抽出したテキストとチャンク後のテキスト情報を出力する関数 ---
+@app.function_name('UploadFilesAndCreateChunksZip')
+@app.route(route="upload_files_and_create_chunks_zip", auth_level=func.AuthLevel.ANONYMOUS)
+def upload_files_and_create_chunks_zip(req: func.HttpRequest) -> func.HttpResponse:
+    logging.info('Python HTTP trigger function processed a file upload and chunk creation request.')
 
-    # AIのキャラクターを決めるためのシステムメッセージを定義する。
-    # ここでは検索クエリ作成の専門家として動作させる想定
-    system_message_for_query = """
-    あなたは検索の専門家です。ユーザーの質問内容を分析し、RAG（Retrieval Augmented Generation）検索に最適なクエリを作成してください。クエリは、検索エンジンが関連性の高い情報を正確に引き出せるように設計します。
-
-    以下の指示に従ってクエリを作成してください：
-    意図の理解: ユーザーの質問や目的を把握し、必要な情報の種類や検索対象を特定します。具体的な回答や資料を求めている場合は、その内容に沿ったキーワードや概念を抽出してください。
-    要素の抽出: 質問の重要なキーワードや概念を特定し、文脈や関連語も加味しながら、簡潔かつ検索に最適化された形で整理します。
-    検索精度の最適化: 必要に応じて、ユーザーの質問に関係のない一般的な単語や冗長な表現は省き、情報の関連度を高めるためのキーワードのみを使用します。
-    具体性の確保: ユーザーが特定の状況や分野に焦点を当てている場合、その背景に合う単語やフレーズを追加し、情報が絞り込まれるようにしてください。
-    出力フォーマット例:
-    質問：「新製品の環境への影響について教えてください」
-    クエリ：「新製品 環境影響 分析」
-    質問内容から必要な要素を抽出し、検索に適したキーワードのみで構成されたクエリを作成してください。
-    検索クエリ本文のみ出力してください。「クエリ：」等の部分は必要ありません。本文のみ出力してください
-    """
     try:
-        # リクエストボディからユーザープロンプトを取得
-        req_body = req.get_json()
-        prompt = req_body.get('prompt')
-        if not prompt:
-            return func.HttpResponse("プロンプトが見つかりません。", status_code=400)
+        files = req.files.getlist('files')
+        if not files:
+            return func.HttpResponse("ファイルが見つかりません", status_code=400)
 
-        # セマンティックハイブリッド検索に必要な「ベクトル化されたクエリ」「キーワード検索用クエリ」のうち、ベクトル化されたクエリを生成する。
-        response = openai_client.embeddings.create(
-            input=prompt,  # ユーザーからの質問を入力としてベクトル化
-            model=aoai_embedding_model  # 使用する埋め込みモデル
-        )
-        # ベクトル化されたクエリを生成し、最も近い5つのコンテンツを検索する設定
-        vector_query = VectorizedQuery(vector=response.data[0].embedding, k_nearest_neighbors=5, fields="contentVector")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            zip_filename = os.path.join(temp_dir, 'processed_files.zip')
 
-        # ユーザーからの質問を元に、Azure AI Searchに投げる検索クエリを生成する
-        query_prompt_template = "以下のユーザーからの質問に基づいて、検索クエリを生成してください: {query}"
-        messages_for_search_query = query_prompt_template.format(query=prompt)  # プロンプトテンプレートに質問を埋め込む
+            with zipfile.ZipFile(zip_filename, 'w') as zipf:
+                for file in files:
+                    file.stream.seek(0)
+                    file_stream = file.stream.read()
+                    if not file_stream:
+                        return func.HttpResponse("ファイルの読み込みに失敗しました", status_code=400)
 
+                    # Document Intelligenceから取得したテキスト
+                    poller = document_intelligence_client.begin_analyze_document(
+                        model_id="prebuilt-layout", analyze_request=io.BytesIO(file_stream),
+                        content_type="application/octet-stream", output_content_format="markdown"
+                    )
+                    result = poller.result()
 
-        # ---- Azure AI Search内の情報を検索するためにGPTを使用して検索用の文章を洗練させる ----
+                    if not result or not hasattr(result, 'content'):
+                        logging.warning(f"結果が無効、または 'content' 属性が存在しません。ファイル名: {file.filename}")
+                        continue
 
-        # Azure OpenAI に検索用クエリ生成を依頼
-        response = openai_client.chat.completions.create(
-            model=gpt_deploy,  # 使用するGPTモデル
-            messages=[
-                {"role": "system", "content": system_message_for_query},  # システムメッセージを設定
-                {"role": "user", "content": messages_for_search_query}  # ユーザーの質問を設定
-            ]
-        )
+                    extracted_text = result.content if result.content else ""
+                    
+                    # テーブル情報がある場合のみ処理
+                    if hasattr(result, 'tables') and result.tables:
+                        for table_idx, table in enumerate(result.tables):
+                            markdown_table = []
+                            cell_count = len(table.cells)
+                            column_count = table.column_count
 
-        # 生成された検索クエリを取得
-        search_query = response.choices[0].message.content.strip()  # クエリのテキストを取得
+                            # セルを行ごとに分割
+                            index = 0
+                            rows = []
+                            while index != cell_count:
+                                rows.append(
+                                    [cell.content for cell in table.cells[index : index + column_count]]
+                                )
+                                index += column_count
 
-        # Azure AI Searchに対してセマンティックハイブリッド検索を実行
-        results = search_client.search(
-            query_type='semantic',
-            semantic_configuration_name='ragdataset-semantic',
-            search_text=search_query,
-            vector_queries=[vector_query],
-            select=['id', 'content'],
-            query_caption='extractive',
-            query_answer="extractive",
-            highlight_pre_tag='<em>',
-            highlight_post_tag='</em>',
-            top=100  # 取得する結果数を設定
-        )
+                            # Markdown形式のテーブルを生成
+                            markdown_table = ""
+                            for i, row in enumerate(rows):
+                                for column in row:
+                                    markdown_table += f"| {column} "
+                                markdown_table += "|\n"
+                            
+                            # テーブルをMarkdownファイルとして保存
+                            table_filename = os.path.join(temp_dir, f"{os.path.splitext(file.filename)[0]}_table_{table_idx + 1}.md")
+                            with open(table_filename, 'w', encoding='utf-8') as table_file:
+                                table_file.write(markdown_table)
+                            zipf.write(table_filename, arcname=f"{os.path.splitext(file.filename)[0]}_table_{table_idx + 1}.md")
+                    else:
+                        logging.info(f"テーブルが見つかりません。ファイル名: {file.filename}")
 
-        # 検索結果をすべて取得してリストにまとめる
-        all_results = [{"id": result["id"], "content": result["content"]} for result in results]
+                    # チャンキング前のテキストをMarkdownファイルとして保存
+                    base_filename = os.path.splitext(file.filename)[0]
+                    markdown_filename = os.path.join(temp_dir, f"{base_filename}_extracted.md")
+                    with open(markdown_filename, 'w', encoding='utf-8') as markdown_file:
+                        markdown_file.write(extracted_text)
+                    zipf.write(markdown_filename, arcname=f"{base_filename}_extracted.md")
 
-        # クエリと検索結果を1つのテキストファイルに書き込む
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".txt") as temp_file:
-            temp_file.write(f"検索クエリ:\n{search_query}\n\n".encode('utf-8'))
-            temp_file.write("検索結果:\n".encode('utf-8'))
-            for result in all_results:
-                temp_file.write(f"ID: {result['id']}\n内容: {result['content']}\n\n".encode('utf-8'))
-            temp_file_path = temp_file.name  # テキストファイルのパスを取得
+                    # Markdownチャンキング
+                    headers_to_split_on = [("#", "Header 1"), ("##", "Header 2"), ("###", "Header 3")]
+                    md_text_splitter = MarkdownHeaderTextSplitter(headers_to_split_on=headers_to_split_on, strip_headers=False)
+                    markdown_splits = md_text_splitter.split_text(extracted_text)
 
-        # テキストファイルを読み込みレスポンスとして返却
-        with open(temp_file_path, 'rb') as file:
-            file_data = file.read()
+                    # チャンク分割
+                    chunk_size = 600
+                    chunk_overlap = 30
+                    text_splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+                    splits = text_splitter.split_documents(markdown_splits)
 
-        # ファイル削除
-        os.remove(temp_file_path)
+                    # チャンクテキストを結合
+                    split_texts = []
+                    for j, split in enumerate(splits):
+                        split_texts.append(f"--- チャンク {j + 1} ---\n{split.page_content}")
+                    combined_text = "\n\n".join(split_texts)
 
-        # HTTPレスポンスを返却
+                    # チャンキング後のテキストをテキストファイルに保存
+                    chunked_filename = os.path.join(temp_dir, f"{base_filename}_chunked.txt")
+                    with open(chunked_filename, 'w', encoding='utf-8') as chunked_file:
+                        chunked_file.write(combined_text)
+                    zipf.write(chunked_filename, arcname=f"{base_filename}_chunked.txt")
+
+            # ZIPファイルを読み込みレスポンスとして返却
+            with open(zip_filename, 'rb') as zip_file:
+                zip_data = zip_file.read()
+
         return func.HttpResponse(
-            file_data,  # テキストファイルのデータを返す
-            mimetype="text/plain",  # MIMEタイプをテキストに設定
-            headers={"Content-Disposition": "attachment; filename=search_results.txt"},  # ファイルのダウンロード名を設定
-            status_code=200  # 成功ステータスコード
+            body=zip_data,
+            mimetype="application/zip",
+            headers={"Content-Disposition": "attachment; filename=processed_files.zip"},
+            status_code=200
         )
 
     except Exception as e:
-        logging.error(f"エラーが発生しました: {str(e)}")
-        return func.HttpResponse(
-            json.dumps({"error": "エラーが発生しました"}, ensure_ascii=False),
-            mimetype="application/json",
-            status_code=500
-        )
+        logging.error(f"エラーが発生しました: {e}", exc_info=True)
+        return func.HttpResponse(f"エラー: {str(e)}", status_code=500)
 
 
 
-# --- セマンティックチャンキングの実装例 ---
-@app.route(route="process_wikipedia_page", methods=['GET'], auth_level=func.AuthLevel.ANONYMOUS)  # エンドポイント名とアクセスレベル（匿名アクセス）を設定
-def process_wikipedia_page(req: func.HttpRequest) -> func.HttpResponse:
-    logging.info('Azure Function for processing Wikipedia page and indexing called.')  # ログに処理開始を記録
 
-    def get_wikipedia_page(title: str):
-        """
-        Retrieve the full text content of a Wikipedia page.
-
-        :param title: str - Title of the Wikipedia page.
-        :return: str - Full text content of the page as raw string.
-        """
-        # Wikipedia APIのエンドポイント
-        URL = "https://ja.wikipedia.org/w/api.php"
-
-        # APIリクエストのパラメータを設定
-        params = {
-            "action": "query",  # クエリアクション
-            "format": "json",  # レスポンスフォーマット
-            "titles": title,  # 取得するページのタイトル
-            "prop": "extracts",  # 抽出したテキストを取得
-            "explaintext": True,  # HTMLタグを除去したプレーンテキスト
-        }
-
-        # Wikipediaのベストプラクティスに従ってUser-Agentヘッダーを設定
-        headers = {"User-Agent": "tutorial/0.0.1"}
-
-        response = requests.get(URL, params=params, headers=headers)  # APIリクエストを送信
-        data = response.json()  # レスポンスをJSON形式で取得
-
-        # ページの内容を抽出
-        page = next(iter(data["query"]["pages"].values()))  # 取得したページ情報を取得
-        return page["extract"] if "extract" in page else None  # テキストが存在すれば返す
+# --- Prebuilt-readモデルを使用してチャンク前のDocument Intelligenceが抽出したテキストとチャンク後のテキスト情報を出力する関数 ---
+@app.function_name('UploadFilesAndCreateChunksZipUsingReadModel')
+@app.route(route="upload_files_and_create_chunks_zip_using_read_model", auth_level=func.AuthLevel.ANONYMOUS)
+def upload_files_and_create_chunks_zip(req: func.HttpRequest) -> func.HttpResponse:
+    logging.info('Python HTTP trigger function started processing a file upload and chunk creation request.')
 
     try:
-        # GETリクエストからtitleを取得
-        title = req.params.get('title', '葬送のフリーレン')  # 'title' パラメータを取得、デフォルトは"葬送のフリーレン"
-        logging.info(f"Fetching Wikipedia page for title: {title}")  # ログにリクエストされたタイトルを記録
-        
-        # Wikipediaから指定されたページの内容を取得
-        full_document = get_wikipedia_page(title)  # ページ内容を取得
+        files = req.files.getlist('files')
+        if not files:
+            logging.warning("No files found in the request.")
+            return func.HttpResponse("ファイルが見つかりません", status_code=400)
 
-        if not full_document:  # ページが存在しない場合のチェック
-            return func.HttpResponse(f"Wikipedia page '{title}' not found", status_code=404)  # 404エラーレスポンスを返す
+        logging.info(f"{len(files)} files found in the request.")
 
-        # Markdownベースのセマンティックチャンキング
-        headers_to_split_on = [
-            ("#", "Header 1"),  # ヘッダーレベル1（#）
-            ("##", "Header 2"),  # ヘッダーレベル2（##）
-            ("###", "Header 3"),  # ヘッダーレベル3（###）
-        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            zip_filename = os.path.join(temp_dir, 'processed_files.zip')
+            logging.info(f"Temporary directory created at {temp_dir}")
 
-        logging.info('セマンティックチャンキング開始')  # チャンキング開始をログに記録
-        # langchainを活用してセマンティックチャンキングを実施
-        md_text_splitter = MarkdownHeaderTextSplitter(headers_to_split_on=headers_to_split_on, strip_headers=False)  # ヘッダーごとに分割する設定
-        markdown_splits = md_text_splitter.split_text(full_document)  # Markdown形式のテキストを分割
+            with zipfile.ZipFile(zip_filename, 'w') as zipf:
+                for file in files:
+                    logging.info(f"Processing file: {file.filename}")
+                    file.stream.seek(0)
+                    file_stream = file.stream.read()
+                    if not file_stream:
+                        logging.error(f"Failed to read the file stream for file {file.filename}.")
+                        return func.HttpResponse(f"ファイル {file.filename} の読み込みに失敗しました", status_code=400)
 
-        # チャンク処理 (RecursiveCharacterTextSplitterを使用)
-        chunk_size = 500  # 各チャンクのサイズ
-        chunk_overlap = 30  # チャンク間の重複サイズ
-        text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=chunk_size, chunk_overlap=chunk_overlap  # チャンクサイズとオーバーラップサイズを指定
-        )
+                    try:
+                        poller = document_intelligence_client.begin_analyze_document(
+                            model_id="prebuilt-read", analyze_request=io.BytesIO(file_stream),
+                            content_type="application/octet-stream", output_content_format="text"
+                        )
+                        result = poller.result()
+                    except Exception as e:
+                        logging.error(f"Failed to analyze document {file.filename}: {e}", exc_info=True)
+                        continue
 
-        # Markdownで分割されたテキストをさらに小さなチャンクに分割
-        splits = text_splitter.split_documents(markdown_splits)  # チャンクごとに分割
-        logging.info(f'セマンティックチャンキング終了{type(splits)}')  # チャンキング終了をログに記録
+                    if not result or 'pages' not in result:
+                        logging.warning(f"No valid pages found in the analysis result for file {file.filename}")
+                        continue
 
-        # Documentオブジェクトからpage_contentを取り出し、区切りを入れて結合
-        split_texts = []  # 分割されたテキストを格納するリスト
-        for i, split in enumerate(splits):  # 各チャンクを処理
-            split_texts.append(f"--- チャンク {i+1} ---\n{split.page_content}")  # チャンク番号と内容を追加
+                    for page in result['pages']:
+                        page_number = page.get('pageNumber', 'N/A')
+                        words = page.get('words', [])
+                        
+                        # ページのテキストを生成
+                        page_text = ''.join([word['content'] for word in words if word.get('content')])
+                        logging.info(f"Generated text for page #{page_number} in file {file.filename}")
 
-        # チャンク化されたテキストを結合
-        combined_text = "\n\n".join(split_texts)  # チャンクを結合して1つの文字列にする
+                        base_filename = os.path.splitext(file.filename)[0]
+                        page_filename = os.path.join(temp_dir, f"{base_filename}_page_{page_number}.txt")
+                        try:
+                            with open(page_filename, 'w', encoding='utf-8') as page_file:
+                                page_file.write(page_text)
+                            zipf.write(page_filename, arcname=f"{base_filename}_page_{page_number}.txt")
+                            logging.info(f"Saved text for page #{page_number}")
+                        except Exception as e:
+                            logging.error(f"Failed to save page text for {file.filename} page {page_number}: {e}")
+                            continue
 
-        # チャンク化されたテキストを返却
+                        chunk_size = 500
+                        try:
+                            chunked_texts = [page_text[i:i + chunk_size] for i in range(0, len(page_text), chunk_size)]
+                            chunked_combined_text = "\n\n".join([f"--- チャンク {j + 1} ---\n{chunk}" for j, chunk in enumerate(chunked_texts)])
+                        except Exception as e:
+                            logging.error(f"Failed to chunk text for {file.filename} page {page_number}: {e}")
+                            continue
+
+                        chunked_filename = os.path.join(temp_dir, f"{base_filename}_page_{page_number}_chunked.txt")
+                        try:
+                            with open(chunked_filename, 'w', encoding='utf-8') as chunked_file:
+                                chunked_file.write(chunked_combined_text)
+                            zipf.write(chunked_filename, arcname=f"{base_filename}_page_{page_number}_chunked.txt")
+                            logging.info(f"Saved chunked text for page #{page_number}")
+                        except Exception as e:
+                            logging.error(f"Failed to save chunked text for {file.filename} page {page_number}: {e}")
+                            continue
+
+            try:
+                with open(zip_filename, 'rb') as zip_file:
+                    zip_data = zip_file.read()
+                logging.info("ZIP file created successfully and ready to be returned.")
+            except Exception as e:
+                logging.error(f"Failed to read the ZIP file: {e}", exc_info=True)
+                return func.HttpResponse("ZIPファイルの読み込みに失敗しました", status_code=500)
+
         return func.HttpResponse(
-            body=combined_text,  # チャンク化されたテキストをレスポンスの本文に設定
-            mimetype="text/plain",  # MIMEタイプをプレーンテキストに設定
-            status_code=200  # 成功ステータスコードを返す
+            body=zip_data,
+            mimetype="application/zip",
+            headers={"Content-Disposition": "attachment; filename=processed_files.zip"},
+            status_code=200
         )
 
-    except Exception as e:  # エラー発生時の処理
-        logging.error(f"エラーが発生しました: {e}")  # エラーメッセージをログに記録
-        return func.HttpResponse(f"エラー: {str(e)}", status_code=500)  # 500エラーレスポンスを返す
+    except Exception as e:
+        logging.error(f"エラーが発生しました: {e}", exc_info=True)
+        return func.HttpResponse(f"エラー: {str(e)}", status_code=500)
